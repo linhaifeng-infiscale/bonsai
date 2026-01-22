@@ -16,87 +16,100 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from huggingface_hub import snapshot_download
-from jax import P
+from flax import nnx
 from transformers import AutoTokenizer
 
-from bonsai.models.deepseek_v3 import modeling, params
+from bonsai.models.deepseek_v3 import modeling
 from bonsai.utils import Sampler
 
 
-def tokenize(tokenizer, input: list[str], shd: P | None = None):
+def tokenize(tokenizer, input: list[str]):
     pad_idx = tokenizer.pad_token_id
-    lines = [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": l}], tokenize=False, add_generation_prompt=True
-        )
-        for l in input
-    ]
+    # DeepSeek-V3 doesn't have a public chat template in all versions, 
+    # we use a simple prompt for the tiny demo.
+    lines = [f"User: {l}\nAssistant:" for l in input]
     lines = [tokenizer.encode(line) for line in lines]
-    max_len = max(len(line) for line in lines)  # Right-align, left-padding to the max token length.
-    return jnp.array([np.pad(l, (max_len - len(l), 0), constant_values=pad_idx) for l in lines], out_sharding=shd)
+    max_len = max(len(line) for line in lines)
+    return jnp.array([np.pad(l, (max_len - len(l), 0), constant_values=pad_idx) for l in lines])
 
 
-def run_model():
-    # Example for DeepSeek-V3 (Warning: Model is very large)
-    # model_ckpt_path = snapshot_download("deepseek-ai/DeepSeek-V3")
-    # config = modeling.ModelConfig.deepseek_v3(use_sharding=True)
+def run_tiny_model():
+    print("🚀 Initializing Tiny DeepSeek-V3 (MLA + MoE) for demonstration...")
     
-    # For testing purposes, we can't easily run the full model without massive compute.
-    # This script assumes you have the checkpoint and hardware.
+    # Tiny configuration that fits in memory
+    config = modeling.ModelConfig._from_param(
+        use_sharding=False,
+        num_layers=4,
+        vocab_size=10000,
+        emb_dim=256,
+        mlp_dim=512,
+        moe_intermediate_size=128,
+        num_heads=8,
+        head_dim=32, # v_head_dim
+        n_shared_experts=1,
+        n_routed_experts=8,
+        routed_scaling_factor=1.0,
+        kv_lora_rank=64,
+        q_lora_rank=128,
+        qk_rope_head_dim=16,
+        qk_nope_head_dim=32,
+        n_group=1,
+        topk_group=1,
+        num_experts_per_tok=2,
+        first_k_dense_replace=1,
+        norm_topk_prob=True,
+        rope_interleave=True,
+        rope_theta=10000,
+        rope_scaling_factor=1.0,
+        local_rope_theta=10000.0,
+        norm_eps=1e-6,
+        tie_word_embeddings=False,
+    )
+
+    query = [
+        "JAX is a powerful library for",
+        "The secret of Mixture-of-Experts is",
+    ]
+
+    # Use a standard tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+    tokens = tokenize(tokenizer, query)
+    batch_size, token_len = tokens.shape
+
+    generate_steps = 20
     
-    print("This script is a template for running DeepSeek-V3. The model is too large for typical CI/CD.")
-    return
+    # Initialize model with random weights
+    rngs = nnx.Rngs(params=0)
+    model = modeling.DeepseekV3(config, rngs=rngs)
+    
+    # Initialize MLA cache
+    cache = model.init_cache(config, batch_size, token_len, generate_steps)
 
-    # mesh = jax.make_mesh((8, 1), ("fsdp", "tp")) # Example mesh
-    # batch_shd = P("fsdp", None)
-    # jax.set_mesh(mesh)
+    key = jax.random.key(42)
+    sampler = Sampler(temperature=0.7, top_p=0.9, top_k=50)
+    jit_sampler = jax.jit(sampler)
 
-    # query = [
-    #     "Why is the sky blue instead of any other color like purple?",
-    #     "Who am I?",
-    # ]
+    print("🏗️  Running Prefill...")
+    logits, cache = modeling.forward(model, cache, tokens, tokenizer.pad_token_id)
+    next_tokens = jit_sampler(logits, key=key)
 
-    # tokenizer = AutoTokenizer.from_pretrained(model_ckpt_path)
-    # tokens = tokenize(tokenizer, query, batch_shd)
-    # batch_size, token_len = tokens.shape
+    print("✍️  Generating...")
+    tokens_list = [next_tokens]
+    for i in range(generate_steps):
+        logits, cache = modeling.forward(model, cache, next_tokens, tokenizer.pad_token_id)
+        next_tokens = jit_sampler(logits, key=key)
+        tokens_list.append(next_tokens)
 
-    # generate_steps = 32
-    # model = params.create_model_from_safe_tensors(model_ckpt_path, config, mesh)
-    # cache = model.init_cache(config, batch_size, token_len, generate_steps)
-
-    # key = jax.random.key(0)
-    # sampler = Sampler(temperature=1.0, top_p=0.8, top_k=10)
-    # jit_sampler = jax.jit(sampler)
-
-    # # prefill
-    # logits, cache = modeling.forward(model, cache, tokens, tokenizer.pad_token_id)
-    # next_tokens = jit_sampler(logits, key=key)
-
-    # # decode
-    # tokens_list = [next_tokens]
-    # finished = jnp.zeros((batch_size,), dtype=jnp.bool_)
-    # for i in range(generate_steps):
-    #     logits, cache = modeling.forward(model, cache, next_tokens, tokenizer.pad_token_id)
-    #     next_tokens = jit_sampler(logits, key=key)
-    #     finished = finished | (next_tokens.squeeze(-1) == tokenizer.eos_token_id)
-    #     tokens_list.append(next_tokens)
-    #     if finished.all():
-    #         break
-
-    # all_output_tokens = jax.device_get(jnp.concatenate(tokens_list, axis=-1))
-    # for i, q in enumerate(query):
-    #     print(f"User:\n {q}")
-    #     seq_tokens = all_output_tokens[i]
-    #     eos_idx = np.where(seq_tokens == tokenizer.eos_token_id)[0]
-    #     if eos_idx.size > 0:
-    #         seq_tokens = seq_tokens[: eos_idx[0]]
-    #     decoded = tokenizer.decode(seq_tokens, skip_special_tokens=True)
-    #     print(f"Answer:\n {decoded}\n\n")
-
+    all_output_tokens = jax.device_get(jnp.concatenate(tokens_list, axis=-1))
+    
+    print("\n" + "="*30)
+    for i, q in enumerate(query):
+        seq_tokens = all_output_tokens[i]
+        decoded = tokenizer.decode(seq_tokens, skip_special_tokens=True)
+        print(f"Prompt: {q}")
+        print(f"Output: {decoded}")
+        print("-" * 30)
 
 if __name__ == "__main__":
-    run_model()
-
-
-__all__ = ["run_model"]
+    run_tiny_model()

@@ -211,7 +211,7 @@ class Einsum(nnx.Module):
     def __init__(self, einsum_str: str, shape: tuple[int, ...], *, shd: ShardingSpec, rngs: nnx.Rngs):
         self.einsum_str = einsum_str
         self.shape = shape
-        self.w = shard(nnx.Param(nnx.initializers.normal()(rngs.params(), shape)), shd)
+        self.w = shard(nnx.Param(nnx.initializers.normal(dtype=jnp.bfloat16)(rngs.params(), shape)), shd)
 
     @jax.named_scope("einsum")
     def __call__(self, x: ArrayLike) -> Array:
@@ -236,8 +236,9 @@ def rotate_half(x):
 def apply_rotary_pos_emb(q, k, cos, sin, interleave=False):
     # q, k: [B, T, H, D]
     # cos, sin: [B, T, D] -> [B, T, 1, D]
-    cos = cos[:, :, None, :]
-    sin = sin[:, :, None, :]
+    dtype = q.dtype
+    cos = cos[:, :, None, :].astype(dtype)
+    sin = sin[:, :, None, :].astype(dtype)
     
     if interleave:
         b, t, h, d = q.shape
@@ -250,7 +251,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, interleave=False):
 
 class RMSNorm(nnx.Module):
     def __init__(self, dim: int, cfg: ModelConfig, *, rngs: nnx.Rngs):
-        self.scale = shard(nnx.Param(nnx.initializers.ones_init()(rngs.params(), dim)), cfg.shd_cfg.rms_norm)
+        self.scale = shard(nnx.Param(nnx.initializers.ones_init()(rngs.params(), dim, dtype=jnp.bfloat16)), cfg.shd_cfg.rms_norm)
         self.norm_eps = cfg.norm_eps
 
     @jax.named_scope("rms_norm")
@@ -288,7 +289,7 @@ class DeepseekV3Attention(nnx.Module):
         self.v_head_dim = cfg.head_dim
         self.num_heads = cfg.num_heads
         
-        linear = partial(nnx.Linear, use_bias=False, rngs=rngs)
+        linear = partial(nnx.Linear, use_bias=False, dtype=jnp.bfloat16, rngs=rngs)
         
         if self.q_lora_rank is None:
             self.q_proj = shard(linear(cfg.emb_dim, self.num_heads * self.qk_head_dim), self.shd_cfg.q_a_weight)
@@ -384,7 +385,7 @@ class DeepseekV3Attention(nnx.Module):
 class MLP(nnx.Module):
     def __init__(self, cfg: ModelConfig, hidden_dim: int, *, rngs: nnx.Rngs):
         self.shd_cfg = cfg.shd_cfg
-        linear = partial(nnx.Linear, use_bias=False, rngs=rngs)
+        linear = partial(nnx.Linear, use_bias=False, dtype=jnp.bfloat16, rngs=rngs)
         self.gate_proj = shard(linear(cfg.emb_dim, hidden_dim), self.shd_cfg.ffw_weight_df)
         self.up_proj = shard(linear(cfg.emb_dim, hidden_dim), self.shd_cfg.ffw_weight_df)
         self.down_proj = shard(linear(hidden_dim, cfg.emb_dim), self.shd_cfg.ffw_weight_fd)
@@ -405,8 +406,8 @@ class TopkRouter(nnx.Module):
         self.top_k = cfg.num_experts_per_tok
         self.routed_scaling_factor = cfg.routed_scaling_factor
         
-        self.weight = shard(nnx.Param(nnx.initializers.normal()(rngs.params(), (self.n_routed_experts, cfg.emb_dim))), cfg.shd_cfg.router_weight)
-        self.e_score_correction_bias = nnx.Param(jnp.zeros((self.n_routed_experts,)))
+        self.weight = shard(nnx.Param(nnx.initializers.normal(dtype=jnp.bfloat16)(rngs.params(), (self.n_routed_experts, cfg.emb_dim))), cfg.shd_cfg.router_weight)
+        self.e_score_correction_bias = nnx.Param(jnp.zeros((self.n_routed_experts,), dtype=jnp.bfloat16))
 
     def __call__(self, x: Array) -> tuple[Array, Array]:
         # x: [B, T, D]
@@ -464,8 +465,8 @@ class MoE(nnx.Module):
         self.inter_dim = cfg.moe_intermediate_size
         self.hidden_dim = cfg.emb_dim
         
-        self.gate_up_proj = shard(nnx.Param(nnx.initializers.normal()(rngs.params(), (self.num_experts, 2 * self.inter_dim, self.hidden_dim))), cfg.shd_cfg.expert_gate_up)
-        self.down_proj = shard(nnx.Param(nnx.initializers.normal()(rngs.params(), (self.num_experts, self.hidden_dim, self.inter_dim))), cfg.shd_cfg.expert_down)
+        self.gate_up_proj = shard(nnx.Param(nnx.initializers.normal(dtype=jnp.bfloat16)(rngs.params(), (self.num_experts, 2 * self.inter_dim, self.hidden_dim))), cfg.shd_cfg.expert_gate_up)
+        self.down_proj = shard(nnx.Param(nnx.initializers.normal(dtype=jnp.bfloat16)(rngs.params(), (self.num_experts, self.hidden_dim, self.inter_dim))), cfg.shd_cfg.expert_down)
 
     def experts_forward(self, hidden_states, top_k_indices, top_k_weights):
         # hidden_states: [N, D]
