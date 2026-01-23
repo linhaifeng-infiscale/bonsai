@@ -63,8 +63,8 @@ class TestModuleForwardPasses(absltest.TestCase):
         cls.bonsai_model = params.create_gemma3_from_pretrained(model_ckpt_path, cls.bonsai_config, mesh=cls.mesh)
 
     def _upgrade_dtypes(self):
-        self.bonsai_model.embed_tokens.weight.embedding.value = (
-            self.bonsai_model.embed_tokens.weight.embedding.value.astype(jnp.float32)
+        self.bonsai_model.embed_tokens.weight.embedding[...] = (
+            self.bonsai_model.embed_tokens.weight.embedding[...].astype(jnp.float32)
         )
         return
 
@@ -320,7 +320,7 @@ class TestModuleForwardPasses(absltest.TestCase):
         tm = self.torch_model.model.language_model.embed_tokens
         nm = self.bonsai_model.embed_tokens
 
-        torch.testing.assert_close(torch.tensor(nm.weight.embedding.value), tm.weight.cpu())
+        torch.testing.assert_close(torch.tensor(nm.weight.embedding[...]), tm.weight.cpu())
         torch.testing.assert_close(torch.tensor(nm.embed_scale), tm.embed_scale.cpu())
 
         t_inputs = self._make_torch_input()
@@ -369,7 +369,7 @@ class TestModuleForwardPasses(absltest.TestCase):
         nx = tx.detach().cpu().numpy()
 
         np.testing.assert_allclose(
-            nm.q_norm.scale.value, tm.q_norm.weight.detach().cpu().numpy(), err_msg="q_norm weights"
+            nm.q_norm.scale[...], tm.q_norm.weight.detach().cpu().numpy(), err_msg="q_norm weights"
         )
 
         ty = tm.q_norm(tx)

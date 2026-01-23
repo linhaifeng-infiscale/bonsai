@@ -268,13 +268,13 @@ class ShardedEmbedding(nnx.Embed):
             raise ValueError("Input type must be an integer or unsigned integer.")
             # Use take because fancy indexing numpy arrays with JAX indices does not
             # work correctly.
-        (embedding,) = self.promote_dtype((self.embedding.value,), dtype=self.dtype, inexact=False)
+        (embedding,) = self.promote_dtype((self.embedding[...],), dtype=self.dtype, inexact=False)
         if self.num_embeddings == 1:
             return jnp.broadcast_to(embedding, (*inputs.shape, self.features))
         return embedding.at[inputs].get(out_sharding=out_sharding)
 
     def attend(self, query: Array, *, out_sharding) -> Array:
-        query, embedding = self.promote_dtype((query, self.embedding.value), dtype=self.dtype)
+        query, embedding = self.promote_dtype((query, self.embedding[...]), dtype=self.dtype)
         return jnp.dot(query, embedding.T, out_sharding=out_sharding)
 
 
@@ -494,7 +494,7 @@ class Gemma3RMSNorm(nnx.Module):
         dtype = x.dtype
         xf32 = x.astype(jnp.float32)
         out = xf32 * jax.lax.rsqrt(jnp.square(xf32).mean(-1, keepdims=True) + self.eps)
-        out = out * (1.0 + self.scale.value.astype(jnp.float32))
+        out = out * (1.0 + self.scale[...].astype(jnp.float32))
         return out.astype(dtype)
 
 
@@ -619,24 +619,24 @@ class Gemma3Attention(nnx.Module):
 
         # Apply rope
         left_pads = count_left_pads(segment_ids)
-        cache.start_ind.value = jnp.where(cache.start_ind.value < 0, left_pads, cache.start_ind.value)
-        position_ids = compute_positions_from_segment_ids(segment_ids) + cache.cur_ind.value
+        cache.start_ind[...] = jnp.where(cache.start_ind[...] < 0, left_pads, cache.start_ind[...])
+        position_ids = compute_positions_from_segment_ids(segment_ids) + cache.cur_ind[...]
         sin, cos = _generate_pos_embeddings(position_ids, self.head_dim, self.rope_theta, factor=self.factor)
         q = apply_rope(q, sin, cos)
         k = apply_rope(k, sin, cos)
 
         # Update cache
-        slice_indices = (0, cache.cur_ind.value, 0, 0)
-        cache.k_cache.value = jax.lax.dynamic_update_slice(cache.k_cache.value, k, slice_indices)
-        cache.v_cache.value = jax.lax.dynamic_update_slice(cache.v_cache.value, v, slice_indices)
+        slice_indices = (0, cache.cur_ind[...], 0, 0)
+        cache.k_cache[...] = jax.lax.dynamic_update_slice(cache.k_cache[...], k, slice_indices)
+        cache.v_cache[...] = jax.lax.dynamic_update_slice(cache.v_cache[...], v, slice_indices)
 
-        k, v = repeat_kv(cache.k_cache.value, self.n_rep), repeat_kv(cache.v_cache.value, self.n_rep)
+        k, v = repeat_kv(cache.k_cache[...], self.n_rep), repeat_kv(cache.v_cache[...], self.n_rep)
         intermediate_shd = self.config.shd_cfg.attn_qk_activation
         qkv = sharded_attention(
             q, k, v, mask=mask, scale=self.scale, attn_logit_sharding=intermediate_shd, out_sharding=shd
         )
         t = x.shape[1]
-        cache.cur_ind.value = cache.cur_ind.value + t
+        cache.cur_ind[...] = cache.cur_ind[...] + t
         return self.o_proj(qkv.reshape(*x.shape[:-1], -1), out_sharding=shd)
 
 
@@ -737,7 +737,7 @@ class Gemma3MultiModalProjector(nnx.Module):
         x = x.reshape(b, t, -1).swapaxes(1, 2)
         x = self.mm_soft_emb_norm(x)
         x = jnp.matmul(
-            x, self.mm_input_projection_weight.value, out_sharding=self.config.vision_config.shd_cfg.activation
+            x, self.mm_input_projection_weight[...], out_sharding=self.config.vision_config.shd_cfg.activation
         )
         return x.astype(vision_outputs.dtype)
 
